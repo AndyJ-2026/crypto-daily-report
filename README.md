@@ -5,17 +5,21 @@
 ## 架构
 
 ```text
-GitHub Actions (10:30 BJT)
-  -> scripts/crypto-daily-report.mjs
-    -> CoinMarketCap / CryptoSlate
-    -> PANEWS RSS + 页面
-    -> Cloudflare Worker /send-lark
-    -> Lark webhook
+Cloudflare Cron (10:30 BJT)
+  -> black-swan-mcp scheduled()
+    -> GitHub workflow_dispatch
+      -> scripts/crypto-daily-report.mjs
+        -> CoinMarketCap / CryptoSlate
+        -> PANEWS RSS + 页面
+        -> Cloudflare Worker /send-lark
+        -> Lark webhook
 ```
 
 ## 运行规则
 
 - 调度时间：北京时间每天 `10:30`
+- 调度源：Cloudflare Cron
+- 执行方式：GitHub Actions `workflow_dispatch`
 - 发送方式：只发送一条消息、只发送一张卡片
 - 转发方式：必须经由 Cloudflare relay，不直接 POST Lark webhook
 - 正文格式：遵循旧 Claude trigger 规则
