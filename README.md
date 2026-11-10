@@ -9,7 +9,7 @@ Cloudflare Cron (10:30 BJT)
   -> black-swan-mcp scheduled()
     -> GitHub workflow_dispatch
       -> scripts/crypto-daily-report.mjs
-        -> CoinMarketCap / CryptoSlate
+        -> CoinGecko API / CoinPaprika API（备用）
         -> PANEWS RSS + 页面
         -> Cloudflare Worker /send-lark
         -> Lark webhook

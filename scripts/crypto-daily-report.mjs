@@ -10,24 +10,9 @@ const LARK_WEBHOOK_SECRET = process.env.CRYPTO_DAILY_LARK_WEBHOOK_SECRET || "";
 const DRY_RUN = process.env.CRYPTO_DAILY_DRY_RUN === "true";
 
 const PRICE_SPECS = [
-  {
-    symbol: "BTC",
-    label: "Bitcoin",
-    cmcUrl: "https://coinmarketcap.com/currencies/bitcoin/",
-    cryptoslateUrl: "https://cryptoslate.com/coins/bitcoin/",
-  },
-  {
-    symbol: "ETH",
-    label: "Ethereum",
-    cmcUrl: "https://coinmarketcap.com/currencies/ethereum/",
-    cryptoslateUrl: "https://cryptoslate.com/coins/ethereum/",
-  },
-  {
-    symbol: "SOL",
-    label: "Solana",
-    cmcUrl: "https://coinmarketcap.com/currencies/solana/",
-    cryptoslateUrl: "https://cryptoslate.com/coins/solana/",
-  },
+  { symbol: "BTC", id: "bitcoin", paprikaId: "btc-bitcoin" },
+  { symbol: "ETH", id: "ethereum", paprikaId: "eth-ethereum" },
+  { symbol: "SOL", id: "solana", paprikaId: "sol-solana" },
 ];
 
 const RSS_URLS = [
@@ -319,59 +304,49 @@ function formatChange(change) {
   return `${sign}${numeric.toFixed(2)}%`;
 }
 
-function parseCoinMarketCapText(text, label) {
-  const compact = text.replace(/\s+/g, " ");
-  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = new RegExp(
-    `${escapedLabel}\\s+price\\s+[A-Z]+\\s+#\\d+\\s+[\\d.]+[MK]?\\s+\\$([\\d,]+(?:\\.\\d+)?)\\s+([+-]?[\\d.]+)%\\s*\\(24h\\)`,
-    "i",
-  );
-  const match = compact.match(regex);
-  if (!match) return null;
-  return {
-    price: Number(match[1].replace(/,/g, "")),
-    change24h: Number(match[2]),
-    source: "CoinMarketCap",
-    sourceUrl: "https://coinmarketcap.com/",
-  };
+async function fetchPriceJson(url) {
+  const response = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+  return response.json();
 }
 
-function parseCryptoSlateText(html) {
-  const compact = html.replace(/\s+/g, " ");
-  const jsonPrice = compact.match(/"name":"Price \(USD\)","value":"?([0-9.]+)"?/i);
-  const jsonChange = compact.match(/"name":"24h Change \(%\)","value":"?(-?[0-9.]+)"?/i);
-  if (jsonPrice && jsonChange) {
-    return {
-      price: Number(jsonPrice[1]),
-      change24h: Number(jsonChange[1]),
-      source: "CryptoSlate",
-      sourceUrl: "https://cryptoslate.com/",
-    };
+function validateQuote(symbol, price, change24h) {
+  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(change24h)) {
+    throw new Error(`Missing or invalid USD price or 24h change for ${symbol}`);
   }
-
-  const meta = compact.match(/content="[^"]*price is \$([0-9,]+(?:\.[0-9]+)?)[^"]*"/i);
-  if (!meta) return null;
-  return {
-    price: Number(meta[1].replace(/,/g, "")),
-    change24h: 0,
-    source: "CryptoSlate",
-    sourceUrl: "https://cryptoslate.com/",
-  };
+  return { price, change24h };
 }
 
-async function fetchPrice(spec) {
+async function fetchPrices() {
   try {
-    const html = await fetchText(spec.cmcUrl);
-    const parsed = parseCoinMarketCapText(stripTags(html), spec.label);
-    if (parsed) return parsed;
-  } catch {}
-
-  const fallback = await fetchText(spec.cryptoslateUrl);
-  const parsedFallback = parseCryptoSlateText(fallback);
-  if (!parsedFallback) {
-    throw new Error(`Unable to parse price for ${spec.symbol}`);
+    const params = new URLSearchParams({
+      ids: PRICE_SPECS.map((spec) => spec.id).join(","),
+      vs_currencies: "usd",
+      include_24hr_change: "true",
+    });
+    const data = await fetchPriceJson(`https://api.coingecko.com/api/v3/simple/price?${params}`);
+    const quotes = PRICE_SPECS.map(({ symbol, id }) =>
+      validateQuote(symbol, data[id]?.usd, data[id]?.usd_24h_change),
+    );
+    return { quotes, source: "CoinGecko", sourceUrl: "https://www.coingecko.com/" };
+  } catch (error) {
+    console.warn(`CoinGecko unavailable: ${error.message}. Trying CoinPaprika.`);
   }
-  return parsedFallback;
+
+  const quotes = await Promise.all(PRICE_SPECS.map(async ({ symbol, paprikaId }) => {
+    try {
+      const ticker = await fetchPriceJson(`https://api.coinpaprika.com/v1/tickers/${paprikaId}`);
+      if (ticker.id !== paprikaId) throw new Error("Unexpected ticker ID");
+      const usd = ticker.quotes?.USD;
+      return validateQuote(symbol, usd?.price, usd?.percent_change_24h);
+    } catch (error) {
+      throw new Error(`CoinPaprika failed for ${symbol}: ${error.message}`, { cause: error });
+    }
+  }));
+  return { quotes, source: "CoinPaprika", sourceUrl: "https://coinpaprika.com/" };
 }
 
 async function fetchPanewsItems() {
@@ -451,20 +426,18 @@ function ensureMinimums(sections) {
   }
 }
 
-function buildReport(prices, sections) {
-  const sourceName = prices[0].source;
-  const sourceUrl = prices[0].sourceUrl;
+function buildReport({ quotes, source, sourceUrl }, sections) {
   const lines = [
     "加密货币日报",
     `截止${formatBeijingTimestamp()}（北京时间）`,
   ];
 
   for (const [index, spec] of PRICE_SPECS.entries()) {
-    const quote = prices[index];
+    const quote = quotes[index];
     lines.push(`${spec.symbol}报价 ${formatPrice(quote.price)} (24小时 ${formatChange(quote.change24h)})`);
   }
 
-  lines.push(`来自：[${sourceName}](${sourceUrl})`);
+  lines.push(`来自：[${source}](${sourceUrl})`);
   lines.push("---");
   lines.push("");
   lines.push("一、行业资讯");
@@ -532,7 +505,7 @@ async function sendReport(content) {
 }
 
 async function main() {
-  const prices = await Promise.all(PRICE_SPECS.map(fetchPrice));
+  const prices = await fetchPrices();
   const panewsItems = await fetchPanewsItems();
   const sections = splitSections(panewsItems);
   ensureMinimums(sections);
