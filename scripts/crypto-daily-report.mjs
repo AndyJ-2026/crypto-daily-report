@@ -313,40 +313,42 @@ async function fetchPriceJson(url) {
   return response.json();
 }
 
-function validateQuote(symbol, price, change24h) {
-  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(change24h)) {
-    throw new Error(`Missing or invalid USD price or 24h change for ${symbol}`);
-  }
-  return { price, change24h };
+function readQuote(price, change24h, source) {
+  if (!Number.isFinite(price) || price <= 0) return null;
+  return { price, change24h: Number.isFinite(change24h) ? change24h : null, source };
 }
 
 async function fetchPrices() {
+  const params = new URLSearchParams({
+    ids: PRICE_SPECS.map((spec) => spec.id).join(","),
+    vs_currencies: "usd",
+    include_24hr_change: "true",
+  });
+  let data;
   try {
-    const params = new URLSearchParams({
-      ids: PRICE_SPECS.map((spec) => spec.id).join(","),
-      vs_currencies: "usd",
-      include_24hr_change: "true",
-    });
-    const data = await fetchPriceJson(`https://api.coingecko.com/api/v3/simple/price?${params}`);
-    const quotes = PRICE_SPECS.map(({ symbol, id }) =>
-      validateQuote(symbol, data[id]?.usd, data[id]?.usd_24h_change),
-    );
-    return { quotes, source: "CoinGecko", sourceUrl: "https://www.coingecko.com/" };
+    data = await fetchPriceJson(`https://api.coingecko.com/api/v3/simple/price?${params}`);
   } catch (error) {
-    console.warn(`CoinGecko unavailable: ${error.message}. Trying CoinPaprika.`);
+    console.warn(`CoinGecko unavailable: ${error.message}`);
   }
 
-  const quotes = await Promise.all(PRICE_SPECS.map(async ({ symbol, paprikaId }) => {
+  return Promise.all(PRICE_SPECS.map(async ({ symbol, id, paprikaId }) => {
+    const entry = data?.[id];
+    const primary = readQuote(entry?.usd, entry?.usd_24h_change, "CoinGecko");
+    if (primary && primary.change24h !== null) return primary;
+
     try {
       const ticker = await fetchPriceJson(`https://api.coinpaprika.com/v1/tickers/${paprikaId}`);
-      if (ticker.id !== paprikaId) throw new Error("Unexpected ticker ID");
+      if (ticker?.id !== paprikaId) throw new Error("Unexpected ticker ID");
       const usd = ticker.quotes?.USD;
-      return validateQuote(symbol, usd?.price, usd?.percent_change_24h);
+      const fallback = readQuote(usd?.price, usd?.percent_change_24h, "CoinPaprika");
+      if (fallback && fallback.change24h !== null) return fallback;
+      console.warn(`Incomplete USD quote for ${symbol} from both providers`);
+      return primary ?? fallback;
     } catch (error) {
-      throw new Error(`CoinPaprika failed for ${symbol}: ${error.message}`, { cause: error });
+      console.warn(`CoinPaprika failed for ${symbol}: ${error.message}`);
+      return primary;
     }
   }));
-  return { quotes, source: "CoinPaprika", sourceUrl: "https://coinpaprika.com/" };
 }
 
 async function fetchPanewsItems() {
@@ -426,18 +428,27 @@ function ensureMinimums(sections) {
   }
 }
 
-function buildReport({ quotes, source, sourceUrl }, sections) {
+function buildReport(quotes, sections) {
   const lines = [
     "加密货币日报",
     `截止${formatBeijingTimestamp()}（北京时间）`,
   ];
-
+  const sourceLinks = {
+    CoinGecko: "[CoinGecko](https://www.coingecko.com/)",
+    CoinPaprika: "[CoinPaprika](https://coinpaprika.com/)",
+  };
+  const sources = new Set();
   for (const [index, spec] of PRICE_SPECS.entries()) {
     const quote = quotes[index];
-    lines.push(`${spec.symbol}报价 ${formatPrice(quote.price)} (24小时 ${formatChange(quote.change24h)})`);
+    if (!quote) {
+      lines.push(`${spec.symbol}报价 暂缺（两个行情源均未取得有效价格）`);
+      continue;
+    }
+    sources.add(sourceLinks[quote.source]);
+    const change = quote.change24h === null ? "涨跌幅暂缺" : formatChange(quote.change24h);
+    lines.push(`${spec.symbol}报价 ${formatPrice(quote.price)} (24小时 ${change})`);
   }
-
-  lines.push(`来自：[${source}](${sourceUrl})`);
+  if (sources.size) lines.push(`来自：${[...sources].join("、")}`);
   lines.push("---");
   lines.push("");
   lines.push("一、行业资讯");
